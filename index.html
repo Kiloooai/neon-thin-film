@@ -7,7 +7,7 @@
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { background:#050505; color:#ccc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow:hidden; }
-    canvas { display:block; width:100vw; height:100vh; }
+    canvas { display:block; width:100vw; height:100vh; filter:drop-shadow(0 0 8px rgba(0,255,255,0.4)); }
     #ui {
       position:absolute; top:10px; left:10px; width:300px;
       background:rgba(10,10,20,0.85); border:1px solid #444;
@@ -17,19 +17,19 @@
     h2 { margin:0 0 8px 0; font-size:16px; color:#0ff; text-shadow:0 0 8px #0ff; }
     .row { display:flex; justify-content:space-between; margin:6px 0; align-items:center; }
     label { color:#aaa; }
-    input[type="range"] { width:180px; }
-    .val { color:#0f0; min-width:40px; text-align:right; }
+    input[type="range"] { width:180px; accent-color:#0ff; }
+    .val { color:#0f0; min-width:40px; text-align:right; font-family:monospace; }
     button {
       width:100%; margin:4px 0; padding:8px; background:#111; color:#0ff;
       border:1px solid #0ff; border-radius:4px; cursor:pointer; font-size:13px;
-      box-shadow:0 0 6px rgba(0,255,255,0.3);
+      box-shadow:0 0 6px rgba(0,255,255,0.3); transition:all 0.2s;
     }
-    button:hover { background:#022; }
+    button:hover { background:#022; box-shadow:0 0 10px rgba(0,255,255,0.6); }
     #stats {
       position:absolute; top:10px; right:10px;
       background:rgba(10,10,20,0.85); border:1px solid #444;
       border-radius:6px; padding:10px 14px; font-size:12px;
-      box-shadow:0 0 10px rgba(0,255,255,0.15);
+      box-shadow:0 0 10px rgba(0,255,255,0.15); color:#0ff;
     }
     #hint {
       position:absolute; bottom:10px; left:0; right:0; text-align:center;
@@ -85,21 +85,25 @@
   // Time for ripple animation
   let time = 0;
 
-  // Color schemes for glow
-  const glowColors = ['#00ffff', '#ff00ff', '#00ff88', '#ffff00'];
+  // Update canvas glow effect dynamically
+  function updateGlow() {
+    canvas.style.filter = `drop-shadow(0 0 ${params.glow}px rgba(0,255,255,0.6))`;
+  }
+  updateGlow();
 
   // UI binding - convenience
   const bind = (id, target, prop, transform=v=>v, fmt=v=>v) => {
     const el = document.getElementById(id);
     el.addEventListener('input', () => {
       let val = parseFloat(el.value);
-      // For n slider that is integer hundredths: convert
       if (id === 'n') val = val / 100;
       target[prop] = transform(val);
       const disp = fmt(val);
       document.getElementById('v-'+id).textContent = disp;
-      if (prop === 'n' || prop === 'dmax' || prop === 'ripple' || prop === 'speed' || prop === 'glow' || prop === 'colorMode')
+      if (['n','dmax','ripple','speed','glow','colorMode'].includes(prop)) {
+        if (prop === 'glow') updateGlow();
         recomputeGradient();
+      }
     });
   };
   bind('n', params, 'n', v=>v, v=>v.toFixed(2));
@@ -164,25 +168,21 @@
     const dmax = params.dmax;
     const ripple = params.ripple;
     const cycles = 2; // number of ripple cycles across width
-    const phaseOffset = time; // for wave motion
+    const phaseOffset = time;
     const r_factor = (n-1)/(n+1);
     const r2 = r_factor * r_factor;
     const data = stripImgData.data;
     const W = stripCanvas.width;
 
     for (let x = 0; x < W; x++) {
-      // Base thickness proportional to x
       const d_base = dmax * x / (W-1);
-      // Add traveling sine ripple
       let d = d_base;
       if (ripple > 0) {
         const wavePhase = 2 * Math.PI * cycles * (x/W) - phaseOffset;
         d += ripple * Math.sin(wavePhase);
       }
-      // Compute reflectance for three wavelengths (nm)
       let red=0, green=0, blue=0;
       if (n !== 1 && r2 > 0) {
-        // Precompute factor 4r2, but we can compute sin^2 individually
         const deltaR = 4 * Math.PI * n * d / 620;
         const deltaG = 4 * Math.PI * n * d / 530;
         const deltaB = 4 * Math.PI * n * d / 460;
@@ -193,18 +193,43 @@
         red = factor * sR;
         green = factor * sG;
         blue = factor * sB;
-      } // else remain 0
-      // Clip
+      }
       red = Math.min(1, Math.max(0, red));
       green = Math.min(1, Math.max(0, green));
       blue = Math.min(1, Math.max(0, blue));
-      // Apply color mode hue rotation
+
+      // Color mode transformation
       let [h,s,l] = rgbToHsl(red, green, blue);
-      const hueOffset = params.colorMode * 0.25; // quarter turn (90°) in hue circle fraction
-      h = (h + hueOffset) % 1;
-      if (h < 0) h += 1;
+      switch (params.colorMode) {
+        case 0: /* identity — leave (h,s,l) as-is */ break;
+        case 1: h = (h + 0.5) % 1; break;                // hue-rotate 180°
+        case 2: { // CMY-inspired: rotate to cyan/yellow/magenta channels
+          // Remap: treat original RGB channels as CMY mix weights
+          // R→C (cyan-opposite), G→M, B→Y
+          const c = 1-red, m = 1-green, y = 1-blue;
+          // Approximate HSL from CMY
+          const maxc = Math.max(c,m,y), minc = Math.min(c,m,y);
+          const l2 = maxc;
+          const s2 = maxc===0 ? 0 : (maxc-minc)/maxc;
+          let h2 = 0;
+          if (s2 > 0) {
+            if (maxc === c) h2 = (m-y)/(maxc-minc) + 4;
+            else if (maxc === m) h2 = (y-c)/(maxc-minc) + 2;
+            else h2 = (c-m)/(maxc-minc);
+            h2 /= 6; if (h2<0) h2+=1;
+          }
+          h = h2; s = s2; l = l2;
+          break;
+        }
+        case 3: { // psychedelic: high saturation + cycling hue offset based on thickness (x proxy via hue)
+          // Intentionally boost saturation and shift hue via sine of thickness
+          const hueShift = 0.3 * Math.sin(3 * h);
+          h = (h + hueShift) % 1; if (h<0) h+=1;
+          s = Math.min(1, s * 1.5);
+          break;
+        }
+      }
       [red, green, blue] = hslToRgb(h, s, l);
-      // Convert to 0-255
       const ri = Math.floor(red * 255);
       const gi = Math.floor(green * 255);
       const bi = Math.floor(blue * 255);
@@ -220,7 +245,6 @@
 
   document.getElementById('reset').onclick = () => {
     params.n = 1.33; params.dmax=1000; params.ripple=100; params.speed=1.0; params.glow=15; params.colorMode=0; params.paused=false;
-    // update UI values
     document.getElementById('n').value = 133; document.getElementById('v-n').textContent = '1.33';
     document.getElementById('dmax').value = 1000; document.getElementById('v-dmax').textContent = '1000';
     document.getElementById('ripple').value = 100; document.getElementById('v-ripple').textContent = '100';
@@ -228,8 +252,7 @@
     document.getElementById('glow').value = 15; document.getElementById('v-glow').textContent = '15';
     document.getElementById('colorMode').value = 0; document.getElementById('v-colorMode').textContent = '0';
     document.getElementById('pause').textContent = 'Pause';
-    time = 0;
-    recomputeGradient();
+    time = 0; updateGlow(); recomputeGradient();
   };
   const pauseBtn = document.getElementById('pause');
   pauseBtn.onclick = () => {
@@ -256,27 +279,20 @@
 
     if (!params.paused) {
       time += dt * params.speed;
-      // If ripple>0, we need recompute every frame.
       if (params.ripple > 0) gradientDirty = true;
     }
 
     if (gradientDirty) recomputeGradient();
 
-    // Draw gradient stretched to full height
     ctx.clearRect(0,0,W,H);
-    // Apply glow via shadow? Too expensive. Instead use a slight blur filter?
-    // Simple: draw the gradient normally.
     ctx.drawImage(stripCanvas, 0, 0, W, H);
 
-    // Update stats that depend on params
     elN.textContent = params.n.toFixed(2);
     elDmax.textContent = Math.round(params.dmax);
 
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
-
-  // Initial gradient
   recomputeGradient();
 })();
 </script>
