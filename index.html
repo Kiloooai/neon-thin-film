@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Neon Thin Film — interference colors</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#050505; color:#ccc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    #ui {
+      position:absolute; top:10px; left:10px; width:300px;
+      background:rgba(10,10,20,0.85); border:1px solid #444;
+      border-radius:6px; padding:12px; font-size:13px;
+      box-shadow:0 0 10px rgba(0,255,255,0.15);
+    }
+    h2 { margin:0 0 8px 0; font-size:16px; color:#0ff; text-shadow:0 0 8px #0ff; }
+    .row { display:flex; justify-content:space-between; margin:6px 0; align-items:center; }
+    label { color:#aaa; }
+    input[type="range"] { width:180px; }
+    .val { color:#0f0; min-width:40px; text-align:right; }
+    button {
+      width:100%; margin:4px 0; padding:8px; background:#111; color:#0ff;
+      border:1px solid #0ff; border-radius:4px; cursor:pointer; font-size:13px;
+      box-shadow:0 0 6px rgba(0,255,255,0.3);
+    }
+    button:hover { background:#022; }
+    #stats {
+      position:absolute; top:10px; right:10px;
+      background:rgba(10,10,20,0.85); border:1px solid #444;
+      border-radius:6px; padding:10px 14px; font-size:12px;
+      box-shadow:0 0 10px rgba(0,255,255,0.15);
+    }
+    #hint {
+      position:absolute; bottom:10px; left:0; right:0; text-align:center;
+      font-size:12px; color:#666; pointer-events:none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h2>Neon Thin Film</h2>
+  <div class="row"><label>Refr. index (n)</label><input id="n" type="range" min="100" max="250" step="1" value="133"><span class="val" id="v-n">1.33</span></div>
+  <div class="row"><label>Max thickness (d)</label><input id="dmax" type="range" min="0" max="2000" step="10" value="1000"><span class="val" id="v-dmax">1000</span></div>
+  <div class="row"><label>Ripple amp</label><input id="ripple" type="range" min="0" max="500" step="10" value="100"><span class="val" id="v-ripple">100</span></div>
+  <div class="row"><label>Wave speed</label><input id="speed" type="range" min="0" max="5" step="0.1" value="1.0"><span class="val" id="v-speed">1.0</span></div>
+  <div class="row"><label>Glow</label><input id="glow" type="range" min="0" max="50" value="15"><span class="val" id="v-glow">15</span></div>
+  <div class="row"><label>Color mode</label><input id="colorMode" type="range" min="0" max="3" value="0"><span class="val" id="v-colorMode">0</span></div>
+  <button id="reset">Reset</button>
+  <button id="pause">Pause</button>
+</div>
+<div id="stats">
+  FPS: <span id="fps">0</span><br>
+  n: <span id="nval">1.33</span><br>
+  dmax: <span id="dmaxval">1000</span> nm
+</div>
+<div id="hint">Thin-film interference colors • Ripple adds traveling waves • Color mode rotates hue</div>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  let W, H;
+  const resize = () => { W=canvas.width=innerWidth; H=canvas.height=innerHeight; recomputeGradient(); };
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Offscreen canvas for gradient strip (1-pixel high)
+  const stripCanvas = document.createElement('canvas');
+  let stripCtx = stripCanvas.getContext('2d');
+  let stripImgData = null;
+
+  // Parameters (n stored as integer hundredths to avoid float slider precision issues)
+  const params = {
+    n: 1.33,
+    dmax: 1000, // nm
+    ripple: 100, // nm amplitude
+    speed: 1.0,  // wave propagation speed
+    glow: 15,
+    colorMode: 0,
+    paused: false
+  };
+
+  // Time for ripple animation
+  let time = 0;
+
+  // Color schemes for glow
+  const glowColors = ['#00ffff', '#ff00ff', '#00ff88', '#ffff00'];
+
+  // UI binding - convenience
+  const bind = (id, target, prop, transform=v=>v, fmt=v=>v) => {
+    const el = document.getElementById(id);
+    el.addEventListener('input', () => {
+      let val = parseFloat(el.value);
+      // For n slider that is integer hundredths: convert
+      if (id === 'n') val = val / 100;
+      target[prop] = transform(val);
+      const disp = fmt(val);
+      document.getElementById('v-'+id).textContent = disp;
+      if (prop === 'n' || prop === 'dmax' || prop === 'ripple' || prop === 'speed' || prop === 'glow' || prop === 'colorMode')
+        recomputeGradient();
+    });
+  };
+  bind('n', params, 'n', v=>v, v=>v.toFixed(2));
+  bind('dmax', params, 'dmax', v=>v, v=>Math.round(v));
+  bind('ripple', params, 'ripple', v=>v, v=>Math.round(v));
+  bind('speed', params, 'speed', v=>v, v=>v.toFixed(1));
+  bind('glow', params, 'glow', v=>v, v=>Math.round(v));
+  bind('colorMode', params, 'colorMode', v=>Math.round(v), v=>Math.round(v));
+
+  // Recompute gradient flag
+  let gradientDirty = true;
+
+  function ensureStrip() {
+    if (stripCanvas.width !== W) {
+      stripCanvas.width = W;
+      stripCanvas.height = 1;
+      stripImgData = stripCtx.createImageData(W, 1);
+    }
+  }
+
+  // HSL/RGB conversion
+  function rgbToHsl(r,g,b) {
+    const max = Math.max(r,g,b), min = Math.min(r,g,b);
+    let h, s, l = (max+min)/2;
+    if (max === min) { h=s=0; } else {
+      const d = max - min;
+      s = l > 0.5 ? d/(2-max-min) : d/(max+min);
+      switch (max) {
+        case r: h = (g-b)/d + (g<b ? 6 : 0); break;
+        case g: h = (b-r)/d + 2; break;
+        case b: h = (r-g)/d + 4; break;
+      }
+      h /= 6;
+    }
+    return [h, s, l];
+  }
+  function hslToRgb(h,s,l) {
+    let r,g,b;
+    if (s === 0) {
+      r=g=b=l;
+    } else {
+      const hue2rgb = (p,q,t) => {
+        if(t<0) t+=1;
+        if(t>1) t-=1;
+        if(t<1/6) return p + (q-p)*6*t;
+        if(t<1/2) return q;
+        if(t<2/3) return p + (q-p)*(2/3-t)*6;
+        return p;
+      };
+      const q = l < 0.5 ? l*(1+s) : l+s - l*s;
+      const p = 2*l - q;
+      r = hue2rgb(p,q,h+1/3);
+      g = hue2rgb(p,q,h);
+      b = hue2rgb(p,q,h-1/3);
+    }
+    return [r,g,b];
+  }
+
+  function recomputeGradient() {
+    ensureStrip();
+    const n = params.n;
+    const dmax = params.dmax;
+    const ripple = params.ripple;
+    const cycles = 2; // number of ripple cycles across width
+    const phaseOffset = time; // for wave motion
+    const r_factor = (n-1)/(n+1);
+    const r2 = r_factor * r_factor;
+    const data = stripImgData.data;
+    const W = stripCanvas.width;
+
+    for (let x = 0; x < W; x++) {
+      // Base thickness proportional to x
+      const d_base = dmax * x / (W-1);
+      // Add traveling sine ripple
+      let d = d_base;
+      if (ripple > 0) {
+        const wavePhase = 2 * Math.PI * cycles * (x/W) - phaseOffset;
+        d += ripple * Math.sin(wavePhase);
+      }
+      // Compute reflectance for three wavelengths (nm)
+      let red=0, green=0, blue=0;
+      if (n !== 1 && r2 > 0) {
+        // Precompute factor 4r2, but we can compute sin^2 individually
+        const deltaR = 4 * Math.PI * n * d / 620;
+        const deltaG = 4 * Math.PI * n * d / 530;
+        const deltaB = 4 * Math.PI * n * d / 460;
+        const sR = Math.pow(Math.sin(deltaR/2), 2);
+        const sG = Math.pow(Math.sin(deltaG/2), 2);
+        const sB = Math.pow(Math.sin(deltaB/2), 2);
+        const factor = 4 * r2;
+        red = factor * sR;
+        green = factor * sG;
+        blue = factor * sB;
+      } // else remain 0
+      // Clip
+      red = Math.min(1, Math.max(0, red));
+      green = Math.min(1, Math.max(0, green));
+      blue = Math.min(1, Math.max(0, blue));
+      // Apply color mode hue rotation
+      let [h,s,l] = rgbToHsl(red, green, blue);
+      const hueOffset = params.colorMode * 0.25; // quarter turn (90°) in hue circle fraction
+      h = (h + hueOffset) % 1;
+      if (h < 0) h += 1;
+      [red, green, blue] = hslToRgb(h, s, l);
+      // Convert to 0-255
+      const ri = Math.floor(red * 255);
+      const gi = Math.floor(green * 255);
+      const bi = Math.floor(blue * 255);
+      const idx = x * 4;
+      data[idx] = ri;
+      data[idx+1] = gi;
+      data[idx+2] = bi;
+      data[idx+3] = 255;
+    }
+    stripCtx.putImageData(stripImgData, 0, 0);
+    gradientDirty = false;
+  }
+
+  document.getElementById('reset').onclick = () => {
+    params.n = 1.33; params.dmax=1000; params.ripple=100; params.speed=1.0; params.glow=15; params.colorMode=0; params.paused=false;
+    // update UI values
+    document.getElementById('n').value = 133; document.getElementById('v-n').textContent = '1.33';
+    document.getElementById('dmax').value = 1000; document.getElementById('v-dmax').textContent = '1000';
+    document.getElementById('ripple').value = 100; document.getElementById('v-ripple').textContent = '100';
+    document.getElementById('speed').value = 1.0; document.getElementById('v-speed').textContent = '1.0';
+    document.getElementById('glow').value = 15; document.getElementById('v-glow').textContent = '15';
+    document.getElementById('colorMode').value = 0; document.getElementById('v-colorMode').textContent = '0';
+    document.getElementById('pause').textContent = 'Pause';
+    time = 0;
+    recomputeGradient();
+  };
+  const pauseBtn = document.getElementById('pause');
+  pauseBtn.onclick = () => {
+    params.paused = !params.paused;
+    pauseBtn.textContent = params.paused ? 'Resume' : 'Pause';
+  };
+
+  // Stats
+  const elFps = document.getElementById('fps');
+  const elN = document.getElementById('nval');
+  const elDmax = document.getElementById('dmaxval');
+
+  let lastTime = performance.now();
+  let frame = 0, fpsAccum = 0;
+  function loop(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+    frame++;
+    fpsAccum += dt;
+    if (fpsAccum >= 0.5) {
+      elFps.textContent = (frame / fpsAccum).toFixed(1);
+      frame = 0; fpsAccum = 0;
+    }
+
+    if (!params.paused) {
+      time += dt * params.speed;
+      // If ripple>0, we need recompute every frame.
+      if (params.ripple > 0) gradientDirty = true;
+    }
+
+    if (gradientDirty) recomputeGradient();
+
+    // Draw gradient stretched to full height
+    ctx.clearRect(0,0,W,H);
+    // Apply glow via shadow? Too expensive. Instead use a slight blur filter?
+    // Simple: draw the gradient normally.
+    ctx.drawImage(stripCanvas, 0, 0, W, H);
+
+    // Update stats that depend on params
+    elN.textContent = params.n.toFixed(2);
+    elDmax.textContent = Math.round(params.dmax);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Initial gradient
+  recomputeGradient();
+})();
+</script>
+</body>
+</html>
